@@ -1,9 +1,49 @@
+// To avoid conflicts with the Linux input key definitions.
+#include <linux/input.h>
+
+enum
+{
+  LINUX_KEY_ENTER = KEY_ENTER,
+  LINUX_KEY_TAB = KEY_TAB,
+  LINUX_KEY_BACKSPACE = KEY_BACKSPACE,
+  LINUX_KEY_PAUSE = KEY_PAUSE,
+  LINUX_KEY_MINUS = KEY_MINUS,
+  LINUX_KEY_F1 = KEY_F1,
+  LINUX_KEY_F10 = KEY_F10,
+  LINUX_KEY_F11 = KEY_F11,
+  LINUX_KEY_F12 = KEY_F12,
+};
+
+#undef KEY_BACKSPACE
+#undef KEY_CAPSLOCK
+#undef KEY_END
+#undef KEY_ENTER
+#undef KEY_F1
+#undef KEY_F2
+#undef KEY_F3
+#undef KEY_F4
+#undef KEY_F5
+#undef KEY_F6
+#undef KEY_F7
+#undef KEY_F8
+#undef KEY_F9
+#undef KEY_F10
+#undef KEY_F11
+#undef KEY_F12
+#undef KEY_HOME
+#undef KEY_MINUS
+#undef KEY_NUMLOCK
+#undef KEY_PAUSE
+#undef KEY_TAB
+
 #include "doomgeneric.h"
+#include "doomkeys.h"
 #include "i_system.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -23,6 +63,15 @@ static unsigned int fbGreenOffset;
 static unsigned int fbBlueOffset;
 
 const char FbDeviceName[] = "/dev/fb0";
+const char InputDeviceName[] = "/dev/input/event0";
+
+// Input events are read in batches.
+#define INPUT_BATCH 16
+
+static int inputFd = -1;
+static struct input_event inputEvents[INPUT_BATCH];
+static int inputHead;
+static int inputCount;
 
 void DG_Init()
 {
@@ -65,6 +114,18 @@ void DG_Init()
   // Center the game screen.
   fbOffsetX = (fbWidth > DOOMGENERIC_RESX) ? ((fbWidth - DOOMGENERIC_RESX) / 2) * fbBytesPerPixel : 0;
   fbOffsetY = (fbHeight > DOOMGENERIC_RESY) ? ((fbHeight - DOOMGENERIC_RESY) / 2) * fbStride : 0;
+
+  // Open input device.
+  inputFd = open(InputDeviceName, O_RDONLY | O_NONBLOCK);
+  if (inputFd < 0)
+  {
+    I_Error("Failed to open %s: %s", InputDeviceName, strerror(errno));
+  }
+
+  if (ioctl(inputFd, EVIOCGRAB, 1UL) != 0)
+  {
+    I_Error("Failed to grab %s: %s", InputDeviceName, strerror(errno));
+  }
 
   // Record the start time.
   clock_gettime(CLOCK_MONOTONIC, &startTime);
@@ -139,11 +200,127 @@ uint32_t DG_GetTicksMs()
 	return (seconds * 1000) + (nsec / 1000000);
 }
 
+// Convert a key code of Linux input into a key of Doom.
+//
+// Returns 0 if the key is not used by the game.
+static unsigned char ConvertToDoomKey(unsigned int code)
+{
+  static const char digits[] = "1234567890"; // KEY_1 - KEY_0
+  static const char row_q[] = "qwertyuiop";  // KEY_Q - KEY_P
+  static const char row_a[] = "asdfghjkl";   // KEY_A - KEY_L
+  static const char row_z[] = "zxcvbnm";     // KEY_Z - KEY_M
+
+  if (KEY_1 <= code && code <= KEY_0)
+  {
+    return digits[code - KEY_1];
+  }
+  if (KEY_Q <= code && code <= KEY_P)
+  {
+    return row_q[code - KEY_Q];
+  }
+  if (KEY_A <= code && code <= KEY_L)
+  {
+    return row_a[code - KEY_A];
+  }
+  if (KEY_Z <= code && code <= KEY_M)
+  {
+    return row_z[code - KEY_Z];
+  }
+  if (LINUX_KEY_F1 <= code && code <= LINUX_KEY_F10)
+  {
+    return KEY_F1 + (code - LINUX_KEY_F1);
+  }
+
+  switch (code)
+  {
+  case LINUX_KEY_ENTER:
+  case KEY_KPENTER:
+    return KEY_ENTER;
+  case KEY_ESC:
+    return KEY_ESCAPE;
+  case LINUX_KEY_TAB:
+    return KEY_TAB;
+  case LINUX_KEY_BACKSPACE:
+    return KEY_BACKSPACE;
+  case LINUX_KEY_PAUSE:
+    return KEY_PAUSE;
+  case KEY_LEFT:
+    return KEY_LEFTARROW;
+  case KEY_RIGHT:
+    return KEY_RIGHTARROW;
+  case KEY_UP:
+    return KEY_UPARROW;
+  case KEY_DOWN:
+    return KEY_DOWNARROW;
+  case KEY_LEFTCTRL:
+  case KEY_RIGHTCTRL:
+    return KEY_FIRE;
+  case KEY_SPACE:
+    return KEY_USE;
+  case KEY_LEFTSHIFT:
+  case KEY_RIGHTSHIFT:
+    return KEY_RSHIFT;
+  case KEY_LEFTALT:
+  case KEY_RIGHTALT:
+    return KEY_RALT;
+  case KEY_COMMA:
+    return KEY_STRAFE_L;
+  case KEY_DOT:
+    return KEY_STRAFE_R;
+  case LINUX_KEY_MINUS:
+    return KEY_MINUS;
+  case KEY_EQUAL:
+    return KEY_EQUALS;
+  case LINUX_KEY_F11:
+    return KEY_F11;
+  case LINUX_KEY_F12:
+    return KEY_F12;
+  default:
+    return 0;
+  }
+}
+
 int DG_GetKey(int *pressed, unsigned char *doomKey)
 {
-  (void)pressed;
-  (void)doomKey;
-  return 0;
+  if (inputFd < 0)
+  {
+    return 0;
+  }
+
+  while (1)
+  {
+    // Feed the next batch of events.
+    if (inputHead == inputCount)
+    {
+      ssize_t n = read(inputFd, inputEvents, sizeof(inputEvents));
+      if (n < (ssize_t)sizeof(struct input_event))
+      {
+        return 0;
+      }
+
+      inputHead = 0;
+      inputCount = n / sizeof(struct input_event);
+    }
+
+    const struct input_event *event = &inputEvents[inputHead++];
+
+    // Key repeat is not necessary.
+    if (event->type != EV_KEY || event->value == 2)
+    {
+      continue;
+    }
+
+    unsigned char key = ConvertToDoomKey(event->code);
+    if (key == 0)
+    {
+      continue;
+    }
+
+    *pressed = event->value;
+    *doomKey = key;
+
+    return 1;
+  }
 }
 
 void DG_SetWindowTitle(const char *title)
