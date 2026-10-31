@@ -61,6 +61,10 @@ static unsigned int fbOffsetY;
 static unsigned int fbRedOffset;
 static unsigned int fbGreenOffset;
 static unsigned int fbBlueOffset;
+static unsigned int fbRedLength;
+static unsigned int fbGreenLength;
+static unsigned int fbBlueLength;
+static unsigned int fbAlphaMask;
 
 const char FbDeviceName[] = "/dev/fb0";
 const char InputDeviceName[] = "/dev/input/event0";
@@ -97,7 +101,7 @@ void DG_Init()
     printf("Failed to get framebuffer info: %s", strerror(errno));
   }
 
-  if (varInfo.bits_per_pixel != 32)
+  if (varInfo.bits_per_pixel != 32 && varInfo.bits_per_pixel != 16)
   {
     I_Error("Unsupported framebuffer depth: %u bpp", varInfo.bits_per_pixel);
   }
@@ -110,6 +114,10 @@ void DG_Init()
   fbRedOffset = varInfo.red.offset;
   fbGreenOffset = varInfo.green.offset;
   fbBlueOffset = varInfo.blue.offset;
+  fbRedLength = varInfo.red.length;
+  fbGreenLength = varInfo.green.length;
+  fbBlueLength = varInfo.blue.length;
+  fbAlphaMask = (varInfo.transp.length == 0) ? 0 : (((1U << varInfo.transp.length) - 1) << varInfo.transp.offset);
 
   // Center the game screen.
   fbOffsetX = (fbWidth > DOOMGENERIC_RESX) ? ((fbWidth - DOOMGENERIC_RESX) / 2) * fbBytesPerPixel : 0;
@@ -137,7 +145,6 @@ void DG_DrawFrame()
   const size_t size = (size_t)fbStride * fbHeight;
   const unsigned int width = (fbWidth < DOOMGENERIC_RESX) ? fbWidth : DOOMGENERIC_RESX;
   const unsigned int height = (fbHeight < DOOMGENERIC_RESY) ? fbHeight : DOOMGENERIC_RESY;
-  const int isNativeOrder = (fbRedOffset == 16 && fbGreenOffset == 8 && fbBlueOffset == 0);
   unsigned int x, y;
   size_t done = 0;
 
@@ -154,20 +161,24 @@ void DG_DrawFrame()
   for (y = 0; y < height; y++)
   {
     const pixel_t *src = DG_ScreenBuffer + (size_t)y * DOOMGENERIC_RESX;
-    uint32_t *dst = (uint32_t *)(frame + fbOffsetY + (size_t)y * fbStride + fbOffsetX);
-
-    if (isNativeOrder)
-    {
-      memcpy(dst, src, width * sizeof(uint32_t));
-      continue;
-    }
+    unsigned char *line = frame + fbOffsetY + (size_t)y * fbStride + fbOffsetX;
 
     for (x = 0; x < width; x++)
     {
       const uint32_t p = src[x];
-      dst[x] = (((p >> 16) & 0xFF) << fbRedOffset) |
-               (((p >> 8) & 0xFF) << fbGreenOffset) |
-               (((p >> 0) & 0xFF) << fbBlueOffset);
+      const uint32_t v = fbAlphaMask |
+                        (((p >> 16) & 0xFF) >> (8 - fbRedLength) << fbRedOffset) |
+                         (((p >> 8) & 0xFF) >> (8 - fbGreenLength) << fbGreenOffset) |
+                         (((p >> 0) & 0xFF) >> (8 - fbBlueLength) << fbBlueOffset);
+
+      if (fbBytesPerPixel == 2)
+      {
+        ((uint16_t *)line)[x] = (uint16_t)v;
+      }
+      else
+      {
+        ((uint32_t *)line)[x] = v;
+      }
     }
   }
 
